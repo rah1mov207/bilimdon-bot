@@ -1,9 +1,9 @@
 import os
-import requests
 from groq import Groq
 from pypdf import PdfReader
-from telegram import Update
+from telegram import Update, Inlineiser
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ==============================
 # TOKENLAR
@@ -15,17 +15,46 @@ GROQ_API_KEY = "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"
 client = Groq(api_key=GROQ_API_KEY)
 
 # ==============================
-# MATN CHAT
+# FOYDALANUVCHI XOTIRASI
 # ==============================
 
-def chat_text(prompt):
+user_memory = {}
+
+# ==============================
+# MATN CHAT (XOTIRA BILAN)
+# ==============================
+
+def chat_text(user_id, prompt):
+
+    if user_id not in user_memory:
+        user_memory[user_id] = [
+            {
+                "role": "system",
+                "content": "Sen Bilimdon Botsan. Har doim o‘zbek tilida foydali javob ber."
+            }
+        ]
+
+    user_memory[user_id].append({
+        "role": "user",
+        "content": prompt
+    })
 
     completion = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
+        messages=user_memory[user_id]
     )
 
-    return completion.choices[0].message.content
+    reply = completion.choices[0].message.content
+
+    user_memory[user_id].append({
+        "role": "assistant",
+        "content": reply
+    })
+
+    # xotirani cheklash (oxirgi 20 xabar)
+    user_memory[user_id] = user_memory[user_id][-20:]
+
+    return reply
 
 # ==============================
 # RASM ANALIZ
@@ -39,7 +68,7 @@ def analyze_image(image_url):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Bu rasmni tahlil qil."},
+                    {"type": "text", "text": "Bu rasmni batafsil tahlil qil."},
                     {
                         "type": "image_url",
                         "image_url": {"url": image_url}
@@ -58,15 +87,15 @@ def analyze_image(image_url):
 def analyze_pdf(file_path):
 
     reader = PdfReader(file_path)
-    text = ""
 
+    text = ""
     for page in reader.pages:
         text += page.extract_text()
 
-    return chat_text(f"Quyidagi PDF mazmunini tushuntir:\n{text[:8000]}")
+    return text[:8000]
 
 # ==============================
-# OVOZNI MATNGA AYLANTRISH
+# AUDIO → TEXT
 # ==============================
 
 def transcribe_audio(file_path):
@@ -85,44 +114,40 @@ def transcribe_audio(file_path):
 # ==============================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
-         "Assalomu alaykum! Men Bilimdon Bot 🤖\n\n"
-        "Qanday yordam bera olaman? \n"
+        "Assalomu alaykum! Men Bilimdon Bot 🤖\n"
+        "Savol yozing, rasm, PDF yoki ovoz yuboring."
     )
 
 # ==============================
-# MATN HANDLER
+# TEXT HANDLER
 # ==============================
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    user_id = update.message.from_user.id
     user_text = update.message.text.lower()
 
-    # agar foydalanuvchi rasm yaratmoqchi bo‘lsa
-    if "rasm yarat" in user_text or "/image" in user_text:
+    if "rasm yarat" in user_text:
 
-        keyboard = [
-            [InlineKeyboardButton(
+        keyboard = [[
+            InlineKeyboardButton(
                 "🖼 Rasm yaratish botini ochish",
                 url="https://t.me/mening_gpt_botim_bot"
-            )]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            )
+        ]]
 
         await update.message.reply_text(
-            "Men rasm yaratolmayman.\n"
-            "Rasm yaratish uchun quyidagi botdan foydalaning:",
-            reply_markup=reply_markup
+            "Men rasm yaratolmayman. Quyidagi botdan foydalaning:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
         return
 
-    # oddiy savollarga javob
     await update.message.reply_text("O‘ylayapman...")
 
-    reply = chat_text(update.message.text)
+    reply = chat_text(user_id, update.message.text)
 
     await update.message.reply_text(reply)
 
@@ -135,6 +160,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Rasm tahlil qilinmoqda...")
 
     photo = update.message.photo[-1]
+
     file = await context.bot.get_file(photo.file_id)
 
     image_url = file.file_path
@@ -152,14 +178,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("PDF o‘qilmoqda...")
 
     document = update.message.document
+
     file = await context.bot.get_file(document.file_id)
 
     file_path = "temp.pdf"
+
     await file.download_to_drive(file_path)
 
-    result = analyze_pdf(file_path)
+    text = analyze_pdf(file_path)
 
-    await update.message.reply_text(result)
+    reply = chat_text(update.message.from_user.id, text)
+
+    await update.message.reply_text(reply)
 
 # ==============================
 # VOICE HANDLER
@@ -167,17 +197,19 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    await update.message.reply_text("Ovoz matnga aylantirilmoqda...")
+    await update.message.reply_text("Ovoz tahlil qilinmoqda...")
 
     voice = update.message.voice
+
     file = await context.bot.get_file(voice.file_id)
 
     file_path = "voice.ogg"
+
     await file.download_to_drive(file_path)
 
     text = transcribe_audio(file_path)
 
-    reply = chat_text(text)
+    reply = chat_text(update.message.from_user.id, text)
 
     await update.message.reply_text(reply)
 
@@ -192,11 +224,14 @@ def main():
     app.add_handler(CommandHandler("start", start))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
+
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    print("Bilimdon Bot ULTIMATE ishga tushdi")
+    print("Bilimdon Bot ishga tushdi")
 
     app.run_polling()
 
